@@ -22,7 +22,7 @@ use crate::discovery::{Discovery, Peer};
 use crate::error::{Error, ErrorPayload, Result};
 use crate::link::{self, LinkExplanation, LinkKind};
 use crate::security::{DeviceIdentity, PairingState, TrustedDevice};
-use crate::transfer::{TransferProgress, TransferStatus};
+use crate::transfer::{TransferDirection, TransferProgress, TransferStatus};
 use crate::transport::{self, TransportCandidate};
 
 /// Application state shared across commands.
@@ -61,19 +61,36 @@ pub struct LinkInfo {
     pub measured_bps: Option<u64>,
 }
 
-#[tauri::command]
-pub fn get_link_info() -> LinkInfo {
-    let (kind, explanation) = link::current();
-    LinkInfo {
-        kind,
-        explanation,
-        measured_bps: None,
-    }
+/// Runs a blocking closure off the async runtime.
+///
+/// The link and interface probes read sysfs or walk the Windows device tree
+/// through SetupAPI. Calling them directly from a command either stalls the UI
+/// thread (a sync command runs on the main thread) or ties up an async worker.
+/// A failed join is a bug in the closure, not a user error, so it surfaces as
+/// `Error::Other`.
+async fn blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Other(anyhow::anyhow!("background task failed: {e}")))
 }
 
 #[tauri::command]
-pub fn get_transports() -> Vec<TransportCandidate> {
-    transport::candidates()
+pub async fn get_link_info() -> Result<LinkInfo> {
+    let (kind, explanation) = blocking(link::current).await?;
+    Ok(LinkInfo {
+        kind,
+        explanation,
+        measured_bps: None,
+    })
+}
+
+#[tauri::command]
+pub async fn get_transports() -> Result<Vec<TransportCandidate>> {
+    blocking(transport::candidates).await
 }
 
 #[tauri::command]
@@ -110,8 +127,16 @@ pub struct Diagnostics {
 
 #[tauri::command]
 pub async fn get_diagnostics(state: State<'_, AppState>) -> Result<Diagnostics> {
-    let (kind, explanation) = link::current();
-    let transports = transport::candidates();
+    // One closure, one hop to the blocking pool, for everything that touches
+    // the OS.
+    let ((kind, explanation), transports, interfaces) = blocking(|| {
+        (
+            link::current(),
+            transport::candidates(),
+            transport::enumerate_interfaces(),
+        )
+    })
+    .await?;
     let peers = state.discovery.peers().await;
 
     let mut notes = Vec::new();
@@ -144,7 +169,7 @@ pub async fn get_diagnostics(state: State<'_, AppState>) -> Result<Diagnostics> 
             explanation,
             measured_bps: None,
         },
-        interfaces: transport::enumerate_interfaces(),
+        interfaces,
         transports,
         peer_count: peers.len(),
         discovery_working: !peers.is_empty(),
@@ -213,7 +238,7 @@ pub async fn remove_trusted_device(state: State<'_, AppState>, device_id: String
     trusted.retain(|d| d.device_id != device_id);
 
     if trusted.len() == before {
-        return Err(Error::TransferNotFound(device_id));
+        return Err(Error::DeviceNotFound(device_id));
     }
     Ok(())
 }
@@ -238,16 +263,12 @@ pub async fn start_transfer(
 ) -> Result<String> {
     let transfer_id = uuid::Uuid::new_v4().to_string();
 
-    let progress = TransferProgress {
-        transfer_id: transfer_id.clone(),
-        status: TransferStatus::Queued,
-        total_bytes: 0,
-        transferred_bytes: 0,
-        current_bps: 0,
-        average_bps: 0,
-        eta_seconds: None,
-        current_file: None,
-    };
+    let progress = TransferProgress::new(
+        transfer_id.clone(),
+        TransferDirection::Send,
+        String::new(),
+        0,
+    );
 
     state
         .transfers
@@ -292,6 +313,10 @@ pub async fn cancel_transfer(
         .get_mut(&transfer_id)
         .ok_or_else(|| Error::TransferNotFound(transfer_id.clone()))?;
 
+    if !progress.status.can_cancel() {
+        return Err(invalid_state(&transfer_id, progress.status, "cancelled"));
+    }
+
     progress.status = TransferStatus::Cancelled;
     let snapshot = progress.clone();
     drop(transfers);
@@ -311,12 +336,24 @@ pub async fn pause_transfer(
         .get_mut(&transfer_id)
         .ok_or_else(|| Error::TransferNotFound(transfer_id.clone()))?;
 
+    if !progress.status.can_pause() {
+        return Err(invalid_state(&transfer_id, progress.status, "paused"));
+    }
+
     progress.status = TransferStatus::Paused;
     let snapshot = progress.clone();
     drop(transfers);
 
     let _ = app.emit("transfer_paused", &snapshot);
     Ok(())
+}
+
+fn invalid_state(transfer_id: &str, status: TransferStatus, attempted: &'static str) -> Error {
+    Error::InvalidTransferState {
+        transfer_id: transfer_id.to_string(),
+        status: format!("{status:?}").to_lowercase(),
+        attempted,
+    }
 }
 
 /// Resumes an interrupted transfer.
@@ -335,11 +372,11 @@ pub async fn resume_transfer(
         .get_mut(&transfer_id)
         .ok_or_else(|| Error::TransferNotFound(transfer_id.clone()))?;
 
+    // Not `MalformedMessage`: that maps to "the connection sent data we could
+    // not understand", which is the wrong thing to tell a user who clicked
+    // Resume on a finished transfer.
     if !progress.status.is_resumable() {
-        return Err(Error::MalformedMessage(format!(
-            "transfer {transfer_id} is {:?} and cannot be resumed",
-            progress.status
-        )));
+        return Err(invalid_state(&transfer_id, progress.status, "resumed"));
     }
 
     progress.status = TransferStatus::Transferring;

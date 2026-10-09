@@ -68,6 +68,29 @@ impl TransferStatus {
             TransferStatus::Interrupted | TransferStatus::Paused | TransferStatus::Failed
         )
     }
+
+    /// Whether the user may pause from here: anything still moving. `Paused`,
+    /// `Interrupted` and `Failed` are already stopped, and the terminal states
+    /// are over. Without this guard a `Completed` transfer could be paused,
+    /// which makes it resumable, which flips it back to `Transferring`.
+    pub fn can_pause(self) -> bool {
+        !self.is_terminal() && !self.is_resumable()
+    }
+
+    /// Whether the user may cancel from here. A `Failed` transfer stays
+    /// resumable, so cancelling it is the explicit way to abandon it; only a
+    /// transfer that already finished or was already cancelled is refused.
+    pub fn can_cancel(self) -> bool {
+        !matches!(self, TransferStatus::Completed | TransferStatus::Cancelled)
+    }
+}
+
+/// Which side of the transfer this machine is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TransferDirection {
+    Send,
+    Receive,
 }
 
 /// A transfer's progress, as the UI needs it.
@@ -75,6 +98,10 @@ impl TransferStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
     pub transfer_id: String,
+    pub direction: TransferDirection,
+    /// Display name of the other computer. Untrusted text from the peer,
+    /// length-limited and stripped of control characters before it gets here.
+    pub peer_name: String,
     pub status: TransferStatus,
     pub total_bytes: u64,
     pub transferred_bytes: u64,
@@ -85,9 +112,34 @@ pub struct TransferProgress {
     /// so the estimate does not jitter (SRS §65).
     pub eta_seconds: Option<u64>,
     pub current_file: Option<String>,
+    /// Why a `Failed` or `Interrupted` transfer stopped, in the structured form
+    /// the UI renders (SRS §79: `transfer_failed` carries the error).
+    pub error: Option<crate::error::ErrorPayload>,
 }
 
 impl TransferProgress {
+    /// A transfer that has just been created: nothing moved yet.
+    pub fn new(
+        transfer_id: String,
+        direction: TransferDirection,
+        peer_name: String,
+        total_bytes: u64,
+    ) -> Self {
+        Self {
+            transfer_id,
+            direction,
+            peer_name,
+            status: TransferStatus::Queued,
+            total_bytes,
+            transferred_bytes: 0,
+            current_bps: 0,
+            average_bps: 0,
+            eta_seconds: None,
+            current_file: None,
+            error: None,
+        }
+    }
+
     /// Fraction complete, clamped to `0.0..=1.0`.
     ///
     /// Guarding the zero case matters: a zero-byte transfer (an empty folder)
@@ -162,8 +214,16 @@ impl ThroughputEstimator {
 ///
 /// Returns the byte offset and length of each chunk. The final chunk is short
 /// when the size is not a multiple of `chunk_size`.
-pub fn chunk_plan(file_size: u64, chunk_size: u32) -> Vec<(u64, u32)> {
-    assert!(chunk_size > 0, "chunk size must be non-zero");
+///
+/// A zero `chunk_size` is an error, not a panic: it can be derived from the
+/// peer's advertised capabilities, and a remote-triggerable panic aborts the
+/// whole process in release builds (`panic = "abort"`).
+pub fn chunk_plan(file_size: u64, chunk_size: u32) -> Result<Vec<(u64, u32)>> {
+    if chunk_size == 0 {
+        return Err(Error::MalformedMessage(
+            "chunk size must be non-zero".into(),
+        ));
+    }
 
     let chunk_size = chunk_size as u64;
     let mut plan = Vec::new();
@@ -175,7 +235,7 @@ pub fn chunk_plan(file_size: u64, chunk_size: u32) -> Vec<(u64, u32)> {
         offset += len;
     }
 
-    plan
+    Ok(plan)
 }
 
 /// How many chunks a file has, without building the plan.
@@ -257,30 +317,73 @@ impl ResumeManifest {
     }
 }
 
-/// Prepares a transfer: validates the peer's manifest of files, resolves every
-/// destination path, and computes the byte total.
+/// Prepares a transfer: validates the peer's manifest of files and resolves
+/// every destination path.
 ///
 /// Every path in `entries` is untrusted. This is the choke point where they are
 /// proven safe (SRS §91) — the write path later assumes the work is done.
+///
+/// Also enforced here: the entry-count bound, and that no two entries resolve
+/// to the same destination — including case-insensitive collisions (`A.txt` and
+/// `a.txt` on Windows and macOS) and a file sharing its name with a directory
+/// that holds other entries.
+///
+/// # What this does not check
+///
+/// Free disk space. Nothing can know it up front without a platform call, so a
+/// full disk is caught when a write fails and reported as `Error::DiskFull`
+/// (see `filesystem::map_write_error`). Use [`check_totals`] to confirm the
+/// declared byte total and file count against the entries themselves.
 pub fn prepare(
     entries: &[FileEntry],
     destination_root: &std::path::Path,
 ) -> Result<Vec<PreparedItem>> {
+    if entries.len() > filesystem::MAX_MANIFEST_ENTRIES {
+        return Err(Error::MalformedMessage(format!(
+            "manifest has {} entries; the limit is {}",
+            entries.len(),
+            filesystem::MAX_MANIFEST_ENTRIES
+        )));
+    }
+
     let mut prepared = Vec::with_capacity(entries.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut file_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut keys: Vec<(String, bool)> = Vec::with_capacity(entries.len());
 
     for entry in entries {
         // Reject before joining, so a traversal attempt is reported as such
         // rather than surfacing as an odd I/O error.
         let target = filesystem::safe_join(destination_root, &entry.relative_path)?;
 
-        // A declared size we cannot write is a failure at prepare time, not
-        // halfway through when the disk fills.
+        // A directory has no bytes of its own; a non-zero size is a malformed
+        // entry, not something to round or ignore.
         if entry.is_dir && entry.size != 0 {
             return Err(Error::MalformedMessage(format!(
                 "directory {} declared a non-zero size",
                 entry.relative_path
             )));
         }
+
+        // Compare on the resolved path, lowercased: `./a`, `a` and `A` are one
+        // destination on a case-insensitive filesystem.
+        let key = target
+            .strip_prefix(destination_root)
+            .unwrap_or(&target)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/");
+        if !seen.insert(key.clone()) {
+            return Err(Error::MalformedMessage(format!(
+                "two entries resolve to the same destination: {}",
+                entry.relative_path
+            )));
+        }
+        if !entry.is_dir {
+            file_keys.insert(key.clone());
+        }
+        keys.push((key, entry.is_dir));
 
         prepared.push(PreparedItem {
             relative_path: entry.relative_path.clone(),
@@ -291,7 +394,53 @@ pub fn prepare(
         });
     }
 
+    // A file cannot also be a folder: `a` as a file and `a/b` as another entry
+    // would have the receiver write through a file.
+    for (key, _) in &keys {
+        let mut prefix_end = 0;
+        while let Some(next) = key[prefix_end..].find('/') {
+            prefix_end += next;
+            if file_keys.contains(&key[..prefix_end]) {
+                return Err(Error::MalformedMessage(format!(
+                    "an entry is placed inside a path that is also a file: {key}"
+                )));
+            }
+            prefix_end += 1;
+        }
+    }
+
     Ok(prepared)
+}
+
+/// Confirms the declared totals against the entries themselves.
+///
+/// The peer states a byte total and a file count separately from the entries;
+/// believing either without checking lets it lie to the progress bar, or hide a
+/// size the destination cannot hold (SRS §92). Returns the verified byte total.
+pub fn check_totals(
+    entries: &[FileEntry],
+    declared_bytes: u64,
+    declared_files: u64,
+) -> Result<u64> {
+    let mut total: u64 = 0;
+    let mut files: u64 = 0;
+    for entry in entries.iter().filter(|e| !e.is_dir) {
+        total = total
+            .checked_add(entry.size)
+            .ok_or_else(|| Error::MalformedMessage("manifest byte total overflows".into()))?;
+        files += 1;
+    }
+    if total != declared_bytes {
+        return Err(Error::MalformedMessage(format!(
+            "declared {declared_bytes} bytes but the entries add up to {total}"
+        )));
+    }
+    if files != declared_files {
+        return Err(Error::MalformedMessage(format!(
+            "declared {declared_files} files but the manifest lists {files}"
+        )));
+    }
+    Ok(total)
 }
 
 /// A manifest entry with its destination already proven safe.
@@ -329,7 +478,7 @@ mod tests {
 
     #[test]
     fn chunk_plan_covers_the_whole_file() {
-        let plan = chunk_plan(10, 4);
+        let plan = chunk_plan(10, 4).unwrap();
         assert_eq!(plan, vec![(0, 4), (4, 4), (8, 2)]);
 
         let total: u64 = plan.iter().map(|(_, len)| *len as u64).sum();
@@ -338,19 +487,30 @@ mod tests {
 
     #[test]
     fn chunk_plan_of_an_exact_multiple_has_no_short_tail() {
-        let plan = chunk_plan(8, 4);
+        let plan = chunk_plan(8, 4).unwrap();
         assert_eq!(plan, vec![(0, 4), (4, 4)]);
     }
 
     #[test]
     fn chunk_plan_of_an_empty_file_is_empty() {
-        assert!(chunk_plan(0, 4).is_empty());
+        assert!(chunk_plan(0, 4).unwrap().is_empty());
         assert_eq!(chunk_count(0, 4), 0);
     }
 
     #[test]
+    fn chunk_plan_rejects_a_zero_chunk_size_instead_of_panicking() {
+        // A peer can advertise `max_chunk_size: 0`; that must surface as an
+        // error, because a panic here aborts the process in release builds.
+        assert!(matches!(
+            chunk_plan(1000, 0),
+            Err(Error::MalformedMessage(_))
+        ));
+        assert!(matches!(chunk_plan(0, 0), Err(Error::MalformedMessage(_))));
+    }
+
+    #[test]
     fn chunk_plan_chunks_are_contiguous() {
-        let plan = chunk_plan(1000, 64);
+        let plan = chunk_plan(1000, 64).unwrap();
         let mut expected_offset = 0u64;
         for (offset, len) in &plan {
             assert_eq!(*offset, expected_offset, "chunk plan has a gap");
@@ -364,7 +524,7 @@ mod tests {
         for size in [0u64, 1, 99, 100, 101, 4095, 4096, 4097] {
             assert_eq!(
                 chunk_count(size, 4096) as usize,
-                chunk_plan(size, 4096).len(),
+                chunk_plan(size, 4096).unwrap().len(),
                 "mismatch at size {size}"
             );
         }
@@ -442,16 +602,9 @@ mod tests {
 
     #[test]
     fn fraction_handles_a_zero_byte_transfer() {
-        let progress = TransferProgress {
-            transfer_id: "t".into(),
-            status: TransferStatus::Transferring,
-            total_bytes: 0,
-            transferred_bytes: 0,
-            current_bps: 0,
-            average_bps: 0,
-            eta_seconds: None,
-            current_file: None,
-        };
+        let mut progress =
+            TransferProgress::new("t".into(), TransferDirection::Send, "peer".into(), 0);
+        progress.status = TransferStatus::Transferring;
         // Must not be NaN.
         assert_eq!(progress.fraction(), 0.0);
         assert!(progress.fraction().is_finite());
@@ -459,16 +612,10 @@ mod tests {
 
     #[test]
     fn fraction_is_clamped() {
-        let mut progress = TransferProgress {
-            transfer_id: "t".into(),
-            status: TransferStatus::Transferring,
-            total_bytes: 100,
-            transferred_bytes: 250,
-            current_bps: 0,
-            average_bps: 0,
-            eta_seconds: None,
-            current_file: None,
-        };
+        let mut progress =
+            TransferProgress::new("t".into(), TransferDirection::Receive, "peer".into(), 100);
+        progress.status = TransferStatus::Transferring;
+        progress.transferred_bytes = 250;
         assert_eq!(progress.fraction(), 1.0);
 
         progress.transferred_bytes = 50;
@@ -547,6 +694,76 @@ mod tests {
         assert!(!TransferStatus::Queued.is_resumable());
     }
 
+    #[test]
+    fn only_a_moving_transfer_can_be_paused() {
+        use TransferStatus::*;
+        for status in [
+            Queued,
+            Preparing,
+            Connecting,
+            Authenticating,
+            Transferring,
+            Verifying,
+        ] {
+            assert!(status.can_pause(), "{status:?} should be pausable");
+        }
+        // Already stopped or already over. Pausing a `Completed` transfer used
+        // to make it resumable and then flip it back to `Transferring`.
+        for status in [Paused, Interrupted, Failed, Completed, Cancelled] {
+            assert!(!status.can_pause(), "{status:?} should not be pausable");
+        }
+    }
+
+    #[test]
+    fn a_finished_or_cancelled_transfer_cannot_be_cancelled() {
+        use TransferStatus::*;
+        assert!(!Completed.can_cancel());
+        assert!(!Cancelled.can_cancel());
+        for status in [
+            Queued,
+            Preparing,
+            Connecting,
+            Authenticating,
+            Transferring,
+            Verifying,
+            Paused,
+            Interrupted,
+        ] {
+            assert!(status.can_cancel(), "{status:?} should be cancellable");
+        }
+    }
+
+    #[test]
+    fn a_failed_transfer_can_still_be_abandoned() {
+        // `Failed` is resumable, so cancel is the only way to give up on it.
+        assert!(TransferStatus::Failed.is_resumable());
+        assert!(TransferStatus::Failed.can_cancel());
+    }
+
+    #[test]
+    fn no_state_is_both_pausable_and_resumable() {
+        // If one were, pause and resume could ping-pong a transfer forever.
+        use TransferStatus::*;
+        for status in [
+            Queued,
+            Preparing,
+            Connecting,
+            Authenticating,
+            Transferring,
+            Verifying,
+            Completed,
+            Paused,
+            Interrupted,
+            Failed,
+            Cancelled,
+        ] {
+            assert!(
+                !(status.can_pause() && status.is_resumable()),
+                "{status:?} is both pausable and resumable"
+            );
+        }
+    }
+
     // --- prepare -------------------------------------------------------------
 
     #[test]
@@ -595,5 +812,88 @@ mod tests {
 
         assert_eq!(prepared.len(), 1);
         assert!(prepared[0].destination.starts_with(root));
+    }
+
+    fn entry(path: &str, size: u64, is_dir: bool) -> FileEntry {
+        FileEntry {
+            relative_path: path.into(),
+            size,
+            is_dir,
+            mode: None,
+            modified: None,
+            sha256: None,
+        }
+    }
+
+    fn malformed<T: std::fmt::Debug>(r: Result<T>) -> bool {
+        matches!(r, Err(Error::MalformedMessage(_)))
+    }
+
+    #[test]
+    fn prepare_rejects_two_entries_for_the_same_destination() {
+        let root = std::path::Path::new("/dest");
+        let dup = vec![entry("a.txt", 1, false), entry("./a.txt", 2, false)];
+        assert!(malformed(prepare(&dup, root)));
+    }
+
+    #[test]
+    fn prepare_rejects_names_that_differ_only_by_case() {
+        // One file on Windows and macOS, so the second would overwrite the first.
+        let root = std::path::Path::new("/dest");
+        let clash = vec![entry("Report.txt", 1, false), entry("report.TXT", 2, false)];
+        assert!(malformed(prepare(&clash, root)));
+    }
+
+    #[test]
+    fn prepare_rejects_an_entry_inside_a_file() {
+        let root = std::path::Path::new("/dest");
+        let through_a_file = vec![entry("a", 1, false), entry("a/b.txt", 1, false)];
+        assert!(malformed(prepare(&through_a_file, root)));
+    }
+
+    #[test]
+    fn prepare_accepts_a_directory_followed_by_its_contents() {
+        let root = std::path::Path::new("/dest");
+        let ok = vec![
+            entry("photos", 0, true),
+            entry("photos/2024", 0, true),
+            entry("photos/2024/a.jpg", 5, false),
+            entry("photos/b.jpg", 7, false),
+        ];
+        assert_eq!(prepare(&ok, root).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn prepare_rejects_a_manifest_over_the_entry_limit() {
+        let root = std::path::Path::new("/dest");
+        let too_many: Vec<FileEntry> = (0..=filesystem::MAX_MANIFEST_ENTRIES)
+            .map(|i| entry(&format!("f{i}"), 0, false))
+            .collect();
+        assert!(malformed(prepare(&too_many, root)));
+    }
+
+    #[test]
+    fn check_totals_accepts_an_honest_manifest() {
+        let entries = vec![
+            entry("d", 0, true),
+            entry("d/a", 10, false),
+            entry("d/b", 5, false),
+        ];
+        assert_eq!(check_totals(&entries, 15, 2).unwrap(), 15);
+    }
+
+    #[test]
+    fn check_totals_rejects_a_lie_about_bytes_or_files() {
+        let entries = vec![entry("a", 10, false), entry("b", 5, false)];
+        // Claiming fewer bytes than the entries hold would hide the real size
+        // from the destination-capacity check and the progress bar.
+        assert!(malformed(check_totals(&entries, 1, 2)));
+        assert!(malformed(check_totals(&entries, 15, 99)));
+    }
+
+    #[test]
+    fn check_totals_survives_sizes_that_overflow() {
+        let entries = vec![entry("a", u64::MAX, false), entry("b", 1, false)];
+        assert!(malformed(check_totals(&entries, 0, 2)));
     }
 }

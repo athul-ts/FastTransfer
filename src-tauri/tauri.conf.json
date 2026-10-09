@@ -44,8 +44,8 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "Direct file transfer over a Thunderbolt cable",
-    "longDescription": "FastTransfer moves files between two computers over a Thunderbolt 3 / USB-C cable at cable speed, with no router, no DHCP, and no Internet connection required.",
+    "shortDescription": "Direct file transfer between two computers",
+    "longDescription": "FastTransfer moves files directly between two computers over the fastest link they support: Thunderbolt where both ends have it, otherwise Ethernet or Wi-Fi. No router, no DHCP, and no Internet connection required.",
     "copyright": "© 2026 FastTransfer",
     "macOS": {
       "minimumSystemVersion": "11.0",

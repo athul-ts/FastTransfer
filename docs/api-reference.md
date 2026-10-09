@@ -69,8 +69,13 @@ Rules enforced in the core:
 trusted. Paths arriving from a peer never flow through this argument — those go
 through `filesystem::safe_join` inside the core (SRS §91).
 
-`resume_transfer` rejects a transfer that is not in a resumable state rather
-than silently accepting it.
+`pause_transfer`, `resume_transfer` and `cancel_transfer` each reject a transfer
+whose current state does not allow them, with `invalidTransferState`, rather
+than silently accepting it. The rules live on `TransferStatus` in `transfer.rs`
+(`can_pause`, `is_resumable`, `can_cancel`): only a moving transfer can be
+paused, only a stopped one resumed, and everything except `COMPLETED` and
+`CANCELLED` can be cancelled — a `FAILED` transfer stays resumable, so cancel is
+how the user abandons it.
 
 ### Settings
 
@@ -138,6 +143,8 @@ which arrives as a plain string — into this shape before it reaches a componen
 | `diskFull` | no space at the destination | yes |
 | `verificationFailed` | SHA-256 mismatch | yes |
 | `transferNotFound` | unknown id | no |
+| `invalidTransferState` | pause, resume or cancel not valid from the current state | no |
+| `deviceNotFound` | unknown trusted-device id | no |
 | `cancelled` | user cancelled | no |
 | `io` | file operation failed | yes |
 | `internal` | unexpected | no |

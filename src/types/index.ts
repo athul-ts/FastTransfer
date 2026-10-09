@@ -220,6 +220,8 @@ export type AppErrorKind =
   | "diskFull"
   | "verificationFailed"
   | "transferNotFound"
+  | "invalidTransferState"
+  | "deviceNotFound"
   | "cancelled"
   | "io"
   | "internal";

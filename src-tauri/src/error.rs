@@ -57,8 +57,13 @@ pub enum Error {
     #[error("destination is not writable: {path}")]
     DestinationNotWritable { path: String, remedy: String },
 
-    #[error("destination disk is full: {required} bytes required, {available} bytes free")]
-    DiskFull { required: u64, available: u64 },
+    /// `available` is `None` when the OS reported the disk full on a write but
+    /// we have no free-space figure; claiming "0 bytes free" would be a guess.
+    #[error("destination disk is full: {required} bytes required")]
+    DiskFull {
+        required: u64,
+        available: Option<u64>,
+    },
 
     #[error("integrity check failed for {path}: expected {expected}, got {actual}")]
     VerificationFailed {
@@ -69,6 +74,20 @@ pub enum Error {
 
     #[error("transfer not found: {0}")]
     TransferNotFound(String),
+
+    /// The action is valid in general but not from the transfer's current
+    /// state, e.g. pausing a transfer that has already completed. `attempted`
+    /// is a past participle ("paused", "cancelled", "resumed") so it reads
+    /// correctly in both the log line and the user-facing message.
+    #[error("transfer {transfer_id} is {status} and cannot be {attempted}")]
+    InvalidTransferState {
+        transfer_id: String,
+        status: String,
+        attempted: &'static str,
+    },
+
+    #[error("device not found: {0}")]
+    DeviceNotFound(String),
 
     #[error("operation cancelled")]
     Cancelled,
@@ -180,11 +199,17 @@ impl Error {
             Error::DiskFull { required, available } => ErrorPayload {
                 kind: "diskFull",
                 what: "The destination disk is full.".into(),
-                why: Some(format!(
-                    "{} required, {} free.",
-                    human_bytes(*required),
-                    human_bytes(*available)
-                )),
+                why: Some(match available {
+                    Some(free) => format!(
+                        "{} required, {} free.",
+                        human_bytes(*required),
+                        human_bytes(*free)
+                    ),
+                    None => format!(
+                        "The disk ran out of space while writing; up to {} was still to come.",
+                        human_bytes(*required)
+                    ),
+                }),
                 remedy: Some("Choose another folder, or free space and retry.".into()),
                 resumable: true,
             },
@@ -200,6 +225,22 @@ impl Error {
                 what: "That transfer no longer exists.".into(),
                 why: Some(format!("Unknown transfer id: {id}")),
                 remedy: None,
+                resumable: false,
+            },
+            Error::InvalidTransferState {
+                status, attempted, ..
+            } => ErrorPayload {
+                kind: "invalidTransferState",
+                what: format!("This transfer cannot be {attempted} right now."),
+                why: Some(format!("It is currently {status}.")),
+                remedy: None,
+                resumable: false,
+            },
+            Error::DeviceNotFound(id) => ErrorPayload {
+                kind: "deviceNotFound",
+                what: "That device is not in your trusted list.".into(),
+                why: Some(format!("Unknown device id: {id}")),
+                remedy: Some("Refresh the list of trusted devices.".into()),
                 resumable: false,
             },
             Error::Cancelled => ErrorPayload {
@@ -268,11 +309,26 @@ mod tests {
     fn disk_full_error_reports_resumable() {
         let err = Error::DiskFull {
             required: 80_000_000_000,
-            available: 12_000_000_000,
+            available: Some(12_000_000_000),
         };
         let payload = err.classify();
         assert!(payload.resumable, "disk-full must offer resume");
         assert_eq!(payload.kind, "diskFull");
+    }
+
+    #[test]
+    fn disk_full_without_a_free_space_figure_does_not_invent_one() {
+        let payload = Error::DiskFull {
+            required: 5_000_000,
+            available: None,
+        }
+        .classify();
+        let why = payload.why.unwrap();
+        assert!(
+            !why.contains("0 B free"),
+            "fabricated a free-space figure: {why}"
+        );
+        assert!(payload.resumable);
     }
 
     #[test]
@@ -291,6 +347,12 @@ mod tests {
             Error::PeerRejected,
             Error::Cancelled,
             Error::TransferNotFound("abc".into()),
+            Error::DeviceNotFound("abc".into()),
+            Error::InvalidTransferState {
+                transfer_id: "abc".into(),
+                status: "completed".into(),
+                attempted: "paused",
+            },
         ];
         for err in samples {
             assert!(
@@ -298,5 +360,28 @@ mod tests {
                 "error {err:?} produced an empty 'what'"
             );
         }
+    }
+
+    #[test]
+    fn invalid_state_names_both_the_state_and_the_attempt() {
+        let payload = Error::InvalidTransferState {
+            transfer_id: "t1".into(),
+            status: "completed".into(),
+            attempted: "cancelled",
+        }
+        .classify();
+        assert_eq!(payload.kind, "invalidTransferState");
+        assert_eq!(payload.what, "This transfer cannot be cancelled right now.");
+        assert_eq!(payload.why.as_deref(), Some("It is currently completed."));
+        assert!(!payload.resumable);
+    }
+
+    #[test]
+    fn unknown_device_is_not_reported_as_an_unknown_transfer() {
+        // `remove_trusted_device` used to return `TransferNotFound`, so the UI
+        // told the user a transfer had vanished when a device had.
+        let payload = Error::DeviceNotFound("dev-x".into()).classify();
+        assert_eq!(payload.kind, "deviceNotFound");
+        assert_ne!(payload.kind, "transferNotFound");
     }
 }

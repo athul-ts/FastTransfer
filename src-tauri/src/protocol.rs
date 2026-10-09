@@ -105,10 +105,21 @@ impl Default for Capabilities {
 impl Capabilities {
     /// Features both peers support. Anything not in the intersection is off for
     /// this session.
+    ///
+    /// Refuses a peer that advertises a zero chunk size: the negotiated value
+    /// feeds `transfer::chunk_plan`, and a session that cannot move a single
+    /// byte per chunk is malformed, not merely slow.
     pub fn intersect(&self, other: &Self) -> Result<Self> {
+        let max_chunk_size = self.max_chunk_size.min(other.max_chunk_size);
+        if max_chunk_size == 0 {
+            return Err(Error::MalformedMessage(
+                "peer advertised a zero maximum chunk size".into(),
+            ));
+        }
+
         Ok(Self {
             protocol: self.protocol.negotiate(other.protocol)?,
-            max_chunk_size: self.max_chunk_size.min(other.max_chunk_size),
+            max_chunk_size,
             resume: self.resume && other.resume,
             sha256: self.sha256 && other.sha256,
             compression: self.compression && other.compression,
@@ -326,9 +337,13 @@ where
 /// Reads one length-prefixed message.
 ///
 /// The length is checked against [`MAX_MESSAGE_SIZE`] *before* the buffer is
-/// allocated, so a peer claiming a 4 GiB frame costs us nothing. A declared
-/// length that the peer then fails to deliver surfaces as a clean `UnexpectedEof`
-/// rather than a hang (SRS §90, §93).
+/// allocated, so a peer claiming a 4 GiB frame is refused without allocating.
+/// A frame within the limit is different: its full declared length (up to
+/// 16 MiB) is allocated and zeroed before the body arrives, so many concurrent
+/// connections can each pin that much. Reading incrementally would bound it by
+/// bytes actually received. A declared length that the peer then fails to
+/// deliver surfaces as a clean `UnexpectedEof` rather than a hang (SRS §90,
+/// §93).
 pub async fn read_message<R>(reader: &mut R) -> Result<Message>
 where
     R: AsyncRead + Unpin,
@@ -447,5 +462,22 @@ mod tests {
             ..Capabilities::default()
         };
         assert_eq!(a.intersect(&b).unwrap().max_chunk_size, 1024 * 1024);
+    }
+
+    #[test]
+    fn a_zero_chunk_size_is_refused_at_negotiation() {
+        // A hostile or broken peer advertising 0 would otherwise reach
+        // `chunk_plan` as the negotiated size.
+        let hostile = Capabilities {
+            max_chunk_size: 0,
+            ..Capabilities::default()
+        };
+        let err = Capabilities::default().intersect(&hostile).unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedMessage(_)),
+            "expected MalformedMessage, got {err:?}"
+        );
+        // And from the other direction.
+        assert!(hostile.intersect(&Capabilities::default()).is_err());
     }
 }
