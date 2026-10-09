@@ -1,0 +1,8 @@
+{
+  "name": "cable-diagnostics",
+  "description": "Interpret the read-only cable verification output against the SRS link classification rules",
+  "version": "0.1.0",
+  "author": {
+    "name": "FastTransfer contributors"
+  }
+}

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS entitlements for FastTransfer.
+
+  Referenced by src-tauri/tauri.conf.json -> bundle.macOS.entitlements.
+
+  These are the Hardened Runtime entitlements required for notarisation. The
+  app is deliberately NOT app-sandboxed: a transfer tool needs to listen on a
+  network interface and read the files the user picks, and the sandbox's
+  restrictions on listening sockets make the cable workflow unworkable.
+
+  Keep this list minimal. Every entitlement added here weakens the guarantee
+  that a compromised webview cannot reach the rest of the machine.
+-->
+<plist version="1.0">
+<dict>
+  <!--
+    The receiver listens for an inbound connection on the Thunderbolt/USB4
+    network interface. Without `network.server` the process cannot bind a
+    listening socket at all, and the transfer fails on the receiving side only
+    — an easy mistake to misdiagnose, because the sender reports a plain
+    connection timeout.
+  -->
+  <key>com.apple.security.network.server</key>
+  <true/>
+
+  <!-- The sender dials the peer's address. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+
+  <!--
+    The user chooses source files and a destination folder through the native
+    picker. Read-write, because the receiving side writes into the chosen
+    destination. This does not grant access to anything the user did not pick.
+  -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+
+  <!--
+    Resume state (SRS FR-RESUME) lives under ~/Library/Application Support,
+    which does not need an entitlement — it is the app's own container. If that
+    ever changes, add the narrowest entitlement that covers it rather than
+    reaching for the broad `files.all` exception.
+  -->
+</dict>
+</plist>

@@ -1,0 +1,85 @@
+[package]
+name = "fasttransfer"
+version = "0.1.0"
+description = "Cable-first direct file transfer between two computers"
+authors = ["Athul"]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+
+[lib]
+# Tauri's mobile targets need all three; the desktop build only uses rlib.
+name = "fasttransfer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-os = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "fs",
+    "sync",
+    "time",
+    "signal",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+# Object-safe async traits, so the transfer engine can hold `Box<dyn Transport>`.
+async-trait = "0.1"
+
+# Integrity — SRS §23
+sha2 = "0.10"
+
+# Symmetric crypto for the session. Established libraries only (NFR-SEC-009).
+# The handshake itself is Noise or TLS 1.3, added in Phase 7 — not before.
+chacha20poly1305 = "0.10"
+rand = "0.8"
+
+# Discovery and interface enumeration
+mdns-sd = "0.13"
+if-addrs = "0.13"
+
+# Windows link probe reads the device tree rather than the adapter's display
+# name, because a display name can be changed and a hardware ID cannot
+# (SRS FR-LINK-003). SetupAPI is the only FFI in the crate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_System_Registry",
+] }
+
+# Cross-platform directories for config/state (SRS §44, §92)
+directories = "5"
+
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

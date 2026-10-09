@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+
+  "productName": "FastTransfer",
+  "version": "0.1.0",
+  "identifier": "app.fasttransfer.desktop",
+
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+
+  "app": {
+    "windows": [
+      {
+        "title": "FastTransfer",
+        "width": 900,
+        "height": 680,
+        "minWidth": 680,
+        "minHeight": 520,
+        "resizable": true,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    },
+    "withGlobalTauri": false
+  },
+
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "deb", "rpm", "appimage", "dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "Direct file transfer over a Thunderbolt cable",
+    "longDescription": "FastTransfer moves files between two computers over a Thunderbolt 3 / USB-C cable at cable speed, with no router, no DHCP, and no Internet connection required.",
+    "copyright": "© 2026 FastTransfer",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null,
+      "entitlements": "entitlements.plist"
+    },
+    "windows": {
+      "wix": {
+        "language": ["en-US"]
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    }
+  },
+
+  "plugins": {}
+}
