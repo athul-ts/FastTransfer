@@ -64,13 +64,26 @@ Rules enforced in the core:
 | `pause_transfer` | `transferId` | `void` |
 | `resume_transfer` | `transferId` | `void` |
 | `cancel_transfer` | `transferId` | `void` |
+| `accept_transfer` | `transferId` | `void` |
+| `reject_transfer` | `transferId` | `void` |
+
+`accept_transfer` and `reject_transfer` answer an `incoming_transfer` event. An
+unanswered request is rejected by the core after 120 seconds. Until encrypted
+pairing (spec F08) lands, this per-transfer approval is the only gate, and
+only development builds can transfer: a release build refuses every send and
+every incoming request with `secureSessionRequired` (spec D-F08-7).
 
 `paths` are **local paths the user picked through the OS dialog**. They are
 trusted. Paths arriving from a peer never flow through this argument — those go
 through `filesystem::safe_join` inside the core (SRS §91).
 
-`resume_transfer` rejects a transfer that is not in a resumable state rather
-than silently accepting it.
+`pause_transfer`, `resume_transfer` and `cancel_transfer` each reject a transfer
+whose current state does not allow them, with `invalidTransferState`, rather
+than silently accepting it. The rules live on `TransferStatus` in `transfer.rs`
+(`can_pause`, `is_resumable`, `can_cancel`): only a moving transfer can be
+paused, only a stopped one resumed, and everything except `COMPLETED` and
+`CANCELLED` can be cancelled — a `FAILED` transfer stays resumable, so cancel is
+how the user abandons it.
 
 ### Settings
 
@@ -97,6 +110,7 @@ pass it to the effect cleanup, or listeners accumulate across re-renders.
 | `transfer_completed` | `TransferProgress` | finished **and verified** |
 | `transfer_failed` | `TransferProgress` | failed; carries the error |
 | `transfer_cancelled` | `TransferProgress` | cancelled |
+| `incoming_transfer` | `IncomingTransfer` | a peer asks to send; answer with `accept_transfer` / `reject_transfer` |
 | `connection_changed` | `LinkInfo` | transport changed mid-session |
 | `diagnostic_update` | `Diagnostics` | diagnostics refreshed |
 
@@ -138,6 +152,9 @@ which arrives as a plain string — into this shape before it reaches a componen
 | `diskFull` | no space at the destination | yes |
 | `verificationFailed` | SHA-256 mismatch | yes |
 | `transferNotFound` | unknown id | no |
+| `invalidTransferState` | pause, resume or cancel not valid from the current state | no |
+| `deviceNotFound` | unknown trusted-device id | no |
+| `secureSessionRequired` | release build asked to transfer before encryption exists | no |
 | `cancelled` | user cancelled | no |
 | `io` | file operation failed | yes |
 | `internal` | unexpected | no |

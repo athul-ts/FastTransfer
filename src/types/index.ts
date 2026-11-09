@@ -100,6 +100,13 @@ export interface Peer {
   /** How we found it. Shown in diagnostics so a failure is explainable. */
   via: DiscoveryMethod;
   link: LinkKind;
+  /**
+   * The best path this computer has to the peer, judged from its own
+   * interface — never from the peer's claim (FR-LINK-003). `null` when the
+   * interface could not be classified.
+   */
+  transport: TransportKind | null;
+  /** Always false until pairing (F08) exists: discovery is not trust. */
   trusted: boolean;
 }
 
@@ -133,8 +140,14 @@ export type TransferStatus =
   | "FAILED"
   | "CANCELLED";
 
+/** Which side of the transfer this computer is on. Mirrors `transfer::TransferDirection`. */
+export type TransferDirection = "SEND" | "RECEIVE";
+
 export interface TransferProgress {
   transferId: string;
+  direction: TransferDirection;
+  /** The other computer's display name. Untrusted text, already sanitised by the core. */
+  peerName: string;
   status: TransferStatus;
   totalBytes: number;
   transferredBytes: number;
@@ -143,6 +156,24 @@ export interface TransferProgress {
   averageBps: number;
   etaSeconds: number | null;
   currentFile: string | null;
+  /** Why a failed, interrupted or disk-full transfer stopped. */
+  error: AppError | null;
+}
+
+/**
+ * An incoming request awaiting the receiving user's answer (SRS §48).
+ * Mirrors `orchestrator::IncomingTransfer`. Every string came from the peer.
+ */
+export interface IncomingTransfer {
+  transferId: string;
+  peerDeviceId: string;
+  peerName: string;
+  peerPlatform: string;
+  fileCount: number;
+  totalBytes: number;
+  /** Up to ten top-level names. */
+  topLevel: string[];
+  destination: string;
 }
 
 export type ConflictResolution = "replace" | "skip" | "keepBoth" | "cancel";
@@ -220,6 +251,9 @@ export type AppErrorKind =
   | "diskFull"
   | "verificationFailed"
   | "transferNotFound"
+  | "invalidTransferState"
+  | "deviceNotFound"
+  | "secureSessionRequired"
   | "cancelled"
   | "io"
   | "internal";
@@ -266,6 +300,7 @@ export const Events = {
   transferCompleted: "transfer_completed",
   transferFailed: "transfer_failed",
   transferCancelled: "transfer_cancelled",
+  incomingTransfer: "incoming_transfer",
   connectionChanged: "connection_changed",
   diagnosticUpdate: "diagnostic_update",
 } as const;

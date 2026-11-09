@@ -1,6 +1,12 @@
 import { Button } from "@/components/shared/Button";
-import type { Peer } from "@/types";
+import type { Peer, TransportKind } from "@/types";
 import { cx, linkLabel } from "@/utils/helpers";
+
+const TRANSPORT_LABEL: Record<TransportKind, string> = {
+  thunderbolt: "Thunderbolt",
+  ethernet: "Ethernet",
+  wifi: "Wi-Fi",
+};
 
 export interface DeviceCardProps {
   peer: Peer;
@@ -13,12 +19,14 @@ export interface DeviceCardProps {
  * One peer in the nearby-devices list. SRS §37.
  *
  * The card shows the trust state explicitly: a device found on the cable is a
- * stranger until the user approves it (SRS NFR-SEC-002). "Send Files" is still
- * offered for an untrusted peer, because pressing it is what starts the pairing
- * flow — it does not grant access on its own.
+ * stranger until the user approves it (SRS NFR-SEC-002). "Send Files" opens the
+ * picker; it grants nothing on its own, because the receiving user approves
+ * every transfer (D-F05-1). Pairing arrives with F08.
  */
 export function DeviceCard({ peer, selected, onSelect, onSend }: DeviceCardProps) {
   const overCable = peer.link === "THUNDERBOLT" || peer.link === "USB4_NETWORK";
+  // The path this computer has to the peer, judged locally (D-F03-4).
+  const path = peer.transport ? TRANSPORT_LABEL[peer.transport] : linkLabel(peer.link);
 
   return (
     <div
@@ -46,7 +54,7 @@ export function DeviceCard({ peer, selected, onSelect, onSend }: DeviceCardProps
           </p>
 
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {peer.platform} · {linkLabel(peer.link)}
+            {peer.platform} · {path}
           </p>
 
           <p className="mt-1 text-xs">

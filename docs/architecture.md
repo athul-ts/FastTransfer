@@ -40,6 +40,8 @@ serialization cost you do not want on the hot path. So the boundary is drawn at
 | `transfer.rs` | Chunking, state machine, resume, backpressure | §20–§22, §27–§29 |
 | `security.rs` | Identity, pairing, trust | §12, §15, §34–§36 |
 | `filesystem.rs` | I/O and the path-safety boundary | §23–§26, §91 |
+| `session.rs` | One connection = one transfer: sender and receiver state machines | §19–§23, specs F04–F07 |
+| `orchestrator.rs` | Runs transfers for the app: listener, approvals, jobs, events | §48, §79 |
 | `commands.rs` | The IPC surface | §79 |
 | `error.rs` | Errors mapped to user-facing meaning | §95 |
 

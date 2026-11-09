@@ -12,17 +12,20 @@
 //! - Any type here must have a mirror in `src/types/index.ts`. Changing one
 //!   without the other is a runtime failure, not a compile error.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{Emitter, State};
+use tauri::State;
 use tokio::sync::Mutex;
 
 use crate::discovery::{Discovery, Peer};
 use crate::error::{Error, ErrorPayload, Result};
 use crate::link::{self, LinkExplanation, LinkKind};
+use crate::orchestrator::{default_download_dir, Orchestrator, ReceivePolicy, TransferTable};
 use crate::security::{DeviceIdentity, PairingState, TrustedDevice};
-use crate::transfer::{TransferProgress, TransferStatus};
+use crate::session::{Decision, LocalIdentity, StopReason};
+use crate::transfer::TransferProgress;
 use crate::transport::{self, TransportCandidate};
 
 /// Application state shared across commands.
@@ -31,17 +34,41 @@ pub struct AppState {
     pub identity: DeviceIdentity,
     pub pairing: Arc<Mutex<PairingState>>,
     pub trusted: Arc<Mutex<Vec<TrustedDevice>>>,
-    pub transfers: Arc<Mutex<std::collections::HashMap<String, TransferProgress>>>,
+    /// A std mutex: progress updates arrive from synchronous callbacks.
+    pub transfers: TransferTable,
+    pub settings: Arc<std::sync::Mutex<ApplicationSettings>>,
+    pub policy: Arc<std::sync::Mutex<ReceivePolicy>>,
+    pub orchestrator: Arc<Orchestrator>,
 }
 
 impl AppState {
-    pub fn new(discovery: Discovery, identity: DeviceIdentity) -> Self {
+    pub fn new(app: tauri::AppHandle, discovery: Arc<Discovery>, identity: DeviceIdentity) -> Self {
+        let settings = ApplicationSettings::default();
+        let policy = Arc::new(std::sync::Mutex::new(ReceivePolicy {
+            destination: settings.download_directory.clone().into(),
+            conflict: settings.conflict_resolution,
+        }));
+        let transfers: TransferTable = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let orchestrator = Orchestrator::new(
+            app,
+            LocalIdentity {
+                device_id: identity.device_id.clone(),
+                display_name: identity.display_name.clone(),
+                platform: identity.platform.clone(),
+            },
+            discovery.clone(),
+            transfers.clone(),
+            policy.clone(),
+        );
         Self {
-            discovery: Arc::new(discovery),
+            discovery,
             identity,
             pairing: Arc::new(Mutex::new(PairingState::new())),
             trusted: Arc::new(Mutex::new(Vec::new())),
-            transfers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            transfers,
+            settings: Arc::new(std::sync::Mutex::new(settings)),
+            policy,
+            orchestrator,
         }
     }
 }
@@ -61,19 +88,36 @@ pub struct LinkInfo {
     pub measured_bps: Option<u64>,
 }
 
-#[tauri::command]
-pub fn get_link_info() -> LinkInfo {
-    let (kind, explanation) = link::current();
-    LinkInfo {
-        kind,
-        explanation,
-        measured_bps: None,
-    }
+/// Runs a blocking closure off the async runtime.
+///
+/// The link and interface probes read sysfs or walk the Windows device tree
+/// through SetupAPI. Calling them directly from a command either stalls the UI
+/// thread (a sync command runs on the main thread) or ties up an async worker.
+/// A failed join is a bug in the closure, not a user error, so it surfaces as
+/// `Error::Other`.
+async fn blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Other(anyhow::anyhow!("background task failed: {e}")))
 }
 
 #[tauri::command]
-pub fn get_transports() -> Vec<TransportCandidate> {
-    transport::candidates()
+pub async fn get_link_info() -> Result<LinkInfo> {
+    let (kind, explanation) = blocking(link::current).await?;
+    Ok(LinkInfo {
+        kind,
+        explanation,
+        measured_bps: None,
+    })
+}
+
+#[tauri::command]
+pub async fn get_transports() -> Result<Vec<TransportCandidate>> {
+    blocking(transport::candidates).await
 }
 
 #[tauri::command]
@@ -110,8 +154,16 @@ pub struct Diagnostics {
 
 #[tauri::command]
 pub async fn get_diagnostics(state: State<'_, AppState>) -> Result<Diagnostics> {
-    let (kind, explanation) = link::current();
-    let transports = transport::candidates();
+    // One closure, one hop to the blocking pool, for everything that touches
+    // the OS.
+    let ((kind, explanation), transports, interfaces) = blocking(|| {
+        (
+            link::current(),
+            transport::candidates(),
+            transport::enumerate_interfaces(),
+        )
+    })
+    .await?;
     let peers = state.discovery.peers().await;
 
     let mut notes = Vec::new();
@@ -144,7 +196,7 @@ pub async fn get_diagnostics(state: State<'_, AppState>) -> Result<Diagnostics> 
             explanation,
             measured_bps: None,
         },
-        interfaces: transport::enumerate_interfaces(),
+        interfaces,
         transports,
         peer_count: peers.len(),
         discovery_working: !peers.is_empty(),
@@ -213,7 +265,7 @@ pub async fn remove_trusted_device(state: State<'_, AppState>, device_id: String
     trusted.retain(|d| d.device_id != device_id);
 
     if trusted.len() == before {
-        return Err(Error::TransferNotFound(device_id));
+        return Err(Error::DeviceNotFound(device_id));
     }
     Ok(())
 }
@@ -222,44 +274,30 @@ pub async fn remove_trusted_device(state: State<'_, AppState>, device_id: String
 // Transfers
 // ---------------------------------------------------------------------------
 
-/// Starts a transfer.
+/// Starts sending files or folders to a discovered device (F05).
 ///
 /// `paths` are filesystem paths the user chose through the OS picker — they are
 /// local and trusted. Paths that arrive *from the peer* are a different matter
-/// and never flow through this argument (SRS §91).
-///
-/// TODO(Phase 4, SRS §108): build the manifest, connect, and run the engine.
+/// and never flow through this argument (SRS §91). A release build refuses
+/// with `secureSessionRequired` until encrypted sessions land (D-F08-7).
 #[tauri::command]
 pub async fn start_transfer(
-    app: tauri::AppHandle,
     state: State<'_, AppState>,
     device_id: String,
     paths: Vec<String>,
 ) -> Result<String> {
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-
-    let progress = TransferProgress {
-        transfer_id: transfer_id.clone(),
-        status: TransferStatus::Queued,
-        total_bytes: 0,
-        transferred_bytes: 0,
-        current_bps: 0,
-        average_bps: 0,
-        eta_seconds: None,
-        current_file: None,
-    };
-
     state
-        .transfers
-        .lock()
+        .orchestrator
+        .clone()
+        .start_send(device_id, paths)
         .await
-        .insert(transfer_id.clone(), progress.clone());
+}
 
-    // The UI must see the queued state immediately, before any I/O happens.
-    let _ = app.emit("transfer_started", &progress);
-    let _ = (device_id, paths);
-
-    Ok(transfer_id)
+fn table(state: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, TransferProgress>> {
+    match state.transfers.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
 }
 
 #[tauri::command]
@@ -267,10 +305,7 @@ pub async fn get_transfer(
     state: State<'_, AppState>,
     transfer_id: String,
 ) -> Result<TransferProgress> {
-    state
-        .transfers
-        .lock()
-        .await
+    table(&state)
         .get(&transfer_id)
         .cloned()
         .ok_or(Error::TransferNotFound(transfer_id))
@@ -278,76 +313,43 @@ pub async fn get_transfer(
 
 #[tauri::command]
 pub async fn list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferProgress>> {
-    Ok(state.transfers.lock().await.values().cloned().collect())
+    Ok(table(&state).values().cloned().collect())
 }
 
+/// Cancels a transfer. Refused for one that already finished or was
+/// cancelled (`TransferStatus::can_cancel`).
 #[tauri::command]
-pub async fn cancel_transfer(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    transfer_id: String,
-) -> Result<()> {
-    let mut transfers = state.transfers.lock().await;
-    let progress = transfers
-        .get_mut(&transfer_id)
-        .ok_or_else(|| Error::TransferNotFound(transfer_id.clone()))?;
-
-    progress.status = TransferStatus::Cancelled;
-    let snapshot = progress.clone();
-    drop(transfers);
-
-    let _ = app.emit("transfer_cancelled", &snapshot);
-    Ok(())
+pub async fn cancel_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<()> {
+    state.orchestrator.stop(&transfer_id, StopReason::Cancel)
 }
 
+/// Pauses a moving transfer (`TransferStatus::can_pause`). The receiver keeps
+/// its part files; the sender can resume.
 #[tauri::command]
-pub async fn pause_transfer(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    transfer_id: String,
-) -> Result<()> {
-    let mut transfers = state.transfers.lock().await;
-    let progress = transfers
-        .get_mut(&transfer_id)
-        .ok_or_else(|| Error::TransferNotFound(transfer_id.clone()))?;
-
-    progress.status = TransferStatus::Paused;
-    let snapshot = progress.clone();
-    drop(transfers);
-
-    let _ = app.emit("transfer_paused", &snapshot);
-    Ok(())
+pub async fn pause_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<()> {
+    state.orchestrator.stop(&transfer_id, StopReason::Pause)
 }
 
-/// Resumes an interrupted transfer.
-///
-/// Only transfers in a resumable state may be resumed — resuming a `Completed`
-/// or `Queued` transfer is a programming error on the caller's side, so it is
-/// rejected rather than silently accepted.
+/// Resumes a paused or interrupted send; only chunks the receiver is missing
+/// are sent again (F06). Only the sending computer can resume.
 #[tauri::command]
-pub async fn resume_transfer(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    transfer_id: String,
-) -> Result<()> {
-    let mut transfers = state.transfers.lock().await;
-    let progress = transfers
-        .get_mut(&transfer_id)
-        .ok_or_else(|| Error::TransferNotFound(transfer_id.clone()))?;
+pub async fn resume_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<()> {
+    state.orchestrator.resume(&transfer_id)
+}
 
-    if !progress.status.is_resumable() {
-        return Err(Error::MalformedMessage(format!(
-            "transfer {transfer_id} is {:?} and cannot be resumed",
-            progress.status
-        )));
-    }
+/// The receiving user accepts an incoming transfer (SRS §48).
+#[tauri::command]
+pub async fn accept_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<()> {
+    state.orchestrator.answer(&transfer_id, Decision::Accept)
+}
 
-    progress.status = TransferStatus::Transferring;
-    let snapshot = progress.clone();
-    drop(transfers);
-
-    let _ = app.emit("transfer_resumed", &snapshot);
-    Ok(())
+/// The receiving user declines an incoming transfer (SRS §48).
+#[tauri::command]
+pub async fn reject_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<()> {
+    state.orchestrator.answer(
+        &transfer_id,
+        Decision::Reject("Declined by the receiver.".into()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +374,8 @@ impl Default for ApplicationSettings {
     fn default() -> Self {
         Self {
             device_name: hostname_fallback(),
-            download_directory: String::new(),
+            // SRS §45: `<Downloads>/FastTransfer` on every platform.
+            download_directory: default_download_dir().display().to_string(),
             conflict_resolution: crate::filesystem::ConflictResolution::default(),
             verify_after_transfer: true,
             resume_automatically: true,
@@ -385,15 +388,46 @@ impl Default for ApplicationSettings {
 }
 
 #[tauri::command]
-pub async fn get_settings() -> Result<ApplicationSettings> {
-    // TODO(Phase 9): load from the app-config directory.
-    Ok(ApplicationSettings::default())
+pub async fn get_settings(state: State<'_, AppState>) -> Result<ApplicationSettings> {
+    Ok(match state.settings.lock() {
+        Ok(s) => s.clone(),
+        Err(p) => p.into_inner().clone(),
+    })
 }
 
+/// Updates settings for this run. Persisting them is Phase 9 (F10).
+///
+/// The download folder is validated here, not just at transfer time: it must
+/// be absolute and must not be a system folder (SRS §49).
 #[tauri::command]
-pub async fn update_settings(settings: ApplicationSettings) -> Result<()> {
-    // TODO(Phase 9): validate and persist.
-    let _ = settings;
+pub async fn update_settings(
+    state: State<'_, AppState>,
+    settings: ApplicationSettings,
+) -> Result<()> {
+    let destination = std::path::PathBuf::from(&settings.download_directory);
+    if !destination.is_absolute() {
+        return Err(Error::DestinationNotWritable {
+            path: settings.download_directory.clone(),
+            remedy: "Choose a full folder path, such as your Downloads folder.".into(),
+        });
+    }
+    crate::filesystem::check_destination_root(&destination)?;
+
+    match state.policy.lock() {
+        Ok(mut p) => {
+            p.destination = destination;
+            p.conflict = settings.conflict_resolution;
+        }
+        Err(poisoned) => {
+            let mut p = poisoned.into_inner();
+            p.destination = destination;
+            p.conflict = settings.conflict_resolution;
+        }
+    }
+    match state.settings.lock() {
+        Ok(mut s) => *s = settings,
+        Err(p) => *p.into_inner() = settings,
+    }
     Ok(())
 }
 

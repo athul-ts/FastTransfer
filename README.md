@@ -2,8 +2,9 @@
 
 Cable-first direct file transfer between two computers.
 
-Plug a Thunderbolt 3 / USB-C cable between two machines, and move files at cable
-speed — no router, no DHCP, no Internet, no cloud.
+Connect two machines directly and move files over the fastest path they actually
+support — Thunderbolt where both ends have it, otherwise direct Ethernet or
+Wi-Fi. No router, no DHCP, no Internet, no cloud.
 
 ## Status
 

@@ -109,6 +109,13 @@ export const pauseTransfer = (transferId: string): Promise<void> =>
 export const resumeTransfer = (transferId: string): Promise<void> =>
   call("resume_transfer", { transferId });
 
+/** The receiving user's answer to an `incoming_transfer` event (SRS §48). */
+export const acceptTransfer = (transferId: string): Promise<void> =>
+  call("accept_transfer", { transferId });
+
+export const rejectTransfer = (transferId: string): Promise<void> =>
+  call("reject_transfer", { transferId });
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------

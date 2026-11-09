@@ -132,11 +132,11 @@ impl IdentityStore {
     ///
     /// # Security
     ///
-    /// TODO(Phase 7, SRS §108): move the private key into the OS keychain
-    /// (Keychain / DPAPI / Secret Service). Until then this stores only the
-    /// public identity and refuses to persist any secret — see the guard below.
-    /// `FASTTRANSFER_INSECURE_IDENTITY_STORE` exists for tests and must never be
-    /// set in a production build.
+    /// TODO(Phase 7, SRS §108): generate a real keypair and keep the private
+    /// half in the OS keychain (Keychain / DPAPI / Secret Service). Until then
+    /// `public_key` is empty and nothing secret is generated or written, so
+    /// `identity.json` holds only a random device id and display name. There is
+    /// no test-only bypass of the keychain; none is needed while no key exists.
     pub fn load_or_create(&self, display_name: String) -> Result<DeviceIdentity> {
         if self.path.exists() {
             let raw = std::fs::read_to_string(&self.path)?;

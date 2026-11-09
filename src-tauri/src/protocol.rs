@@ -41,6 +41,43 @@ pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 /// Default chunk size. Negotiated down at session start if the peer wants less.
 pub const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024;
 
+/// Smallest and largest chunk size a session may negotiate (D-F04-3).
+pub const MIN_CHUNK_SIZE: u32 = 64 * 1024;
+pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Longest display name accepted from a peer, in characters (D-F03-6, D-F04-7).
+pub const MAX_DISPLAY_NAME_CHARS: usize = 64;
+
+/// Whether a device id from the wire is acceptable: the shape of a UUID, so it
+/// can be logged, used as a map key and shown without escaping (SRS §92).
+pub fn is_valid_device_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Cleans text a peer sent before it is stored or shown.
+///
+/// Removes control characters and the Unicode bidirectional overrides that can
+/// make a name render reversed or spoof another device, trims, and truncates to
+/// `max_chars` characters. The result is display text only; it is never used
+/// to decide anything (SRS §92).
+pub fn sanitize_remote_text(text: &str, max_chars: usize) -> String {
+    const BIDI: &[char] = &[
+        '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+        '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ];
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_control() && !BIDI.contains(c))
+        .collect();
+    cleaned
+        .trim()
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolVersion {
     pub major: u16,
@@ -105,10 +142,27 @@ impl Default for Capabilities {
 impl Capabilities {
     /// Features both peers support. Anything not in the intersection is off for
     /// this session.
+    ///
+    /// Refuses a peer that advertises a zero chunk size: the negotiated value
+    /// feeds `transfer::chunk_plan`, and a session that cannot move a single
+    /// byte per chunk is malformed, not merely slow.
     pub fn intersect(&self, other: &Self) -> Result<Self> {
+        let max_chunk_size = self.max_chunk_size.min(other.max_chunk_size);
+        if max_chunk_size == 0 {
+            return Err(Error::MalformedMessage(
+                "peer advertised a zero maximum chunk size".into(),
+            ));
+        }
+        // A 1-byte chunk would turn a 100 GB file into 10^11 chunks (D-F04-3).
+        if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&max_chunk_size) {
+            return Err(Error::MalformedMessage(format!(
+                "negotiated chunk size {max_chunk_size} is outside {MIN_CHUNK_SIZE}..={MAX_CHUNK_SIZE}"
+            )));
+        }
+
         Ok(Self {
             protocol: self.protocol.negotiate(other.protocol)?,
-            max_chunk_size: self.max_chunk_size.min(other.max_chunk_size),
+            max_chunk_size,
             resume: self.resume && other.resume,
             sha256: self.sha256 && other.sha256,
             compression: self.compression && other.compression,
@@ -326,9 +380,13 @@ where
 /// Reads one length-prefixed message.
 ///
 /// The length is checked against [`MAX_MESSAGE_SIZE`] *before* the buffer is
-/// allocated, so a peer claiming a 4 GiB frame costs us nothing. A declared
-/// length that the peer then fails to deliver surfaces as a clean `UnexpectedEof`
-/// rather than a hang (SRS §90, §93).
+/// allocated, so a peer claiming a 4 GiB frame is refused without allocating.
+/// A frame within the limit is different: its full declared length (up to
+/// 16 MiB) is allocated and zeroed before the body arrives, so many concurrent
+/// connections can each pin that much. Reading incrementally would bound it by
+/// bytes actually received. A declared length that the peer then fails to
+/// deliver surfaces as a clean `UnexpectedEof` rather than a hang (SRS §90,
+/// §93).
 pub async fn read_message<R>(reader: &mut R) -> Result<Message>
 where
     R: AsyncRead + Unpin,
@@ -447,5 +505,75 @@ mod tests {
             ..Capabilities::default()
         };
         assert_eq!(a.intersect(&b).unwrap().max_chunk_size, 1024 * 1024);
+    }
+
+    #[test]
+    fn a_zero_chunk_size_is_refused_at_negotiation() {
+        // A hostile or broken peer advertising 0 would otherwise reach
+        // `chunk_plan` as the negotiated size.
+        let hostile = Capabilities {
+            max_chunk_size: 0,
+            ..Capabilities::default()
+        };
+        let err = Capabilities::default().intersect(&hostile).unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedMessage(_)),
+            "expected MalformedMessage, got {err:?}"
+        );
+        // And from the other direction.
+        assert!(hostile.intersect(&Capabilities::default()).is_err());
+    }
+
+    /// AC-F04-06: chunk sizes outside 64 KiB – 16 MiB are refused (D-F04-3).
+    #[test]
+    fn chunk_size_outside_bounds_is_refused() {
+        let tiny = Capabilities {
+            max_chunk_size: 1024,
+            ..Capabilities::default()
+        };
+        assert!(Capabilities::default().intersect(&tiny).is_err(), "1 KiB");
+
+        let huge = Capabilities {
+            max_chunk_size: 32 * 1024 * 1024,
+            ..Capabilities::default()
+        };
+        assert!(huge.intersect(&huge).is_err(), "32 MiB");
+
+        let floor = Capabilities {
+            max_chunk_size: MIN_CHUNK_SIZE,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            Capabilities::default()
+                .intersect(&floor)
+                .unwrap()
+                .max_chunk_size,
+            MIN_CHUNK_SIZE
+        );
+    }
+
+    /// AC-F04-07: an unknown message type is an error, not silently ignored.
+    #[tokio::test]
+    async fn unknown_message_type_is_rejected() {
+        let payload = br#"{"type":"format_disk","target":"C:"}"#;
+        let mut wire = (payload.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(payload);
+        let mut reader = BufReader::new(wire.as_slice());
+        assert!(matches!(
+            read_message(&mut reader).await,
+            Err(Error::MalformedMessage(_))
+        ));
+    }
+
+    #[test]
+    fn remote_text_is_cleaned_and_capped() {
+        assert_eq!(
+            sanitize_remote_text("  Lap\u{0}top\u{202e} A \n", 64),
+            "Laptop A"
+        );
+        assert_eq!(sanitize_remote_text(&"x".repeat(100), 10).len(), 10);
+        assert!(is_valid_device_id("3f2b8c1e-aaaa-4bbb-8ccc-123456789abc"));
+        assert!(!is_valid_device_id("../x"));
+        assert!(!is_valid_device_id(""));
     }
 }

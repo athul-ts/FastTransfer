@@ -38,11 +38,14 @@ src-tauri/            Rust core — owns all networking, I/O, crypto
     link.rs           cable classification (THUNDERBOLT / USB_DATA_ONLY / ...)
     discovery.rs      mDNS + router-free link-local fallback
     transport.rs      interface enumeration, ranking, fallback
-    transfer.rs       chunked streaming, resume, backpressure
+    transfer.rs       chunk plans, manifests, status rules, progress
+    session.rs        sender/receiver state machines over any byte stream
+    orchestrator.rs   listener, incoming approvals, jobs, UI events
     security.rs       device identity, pairing, session crypto
     filesystem.rs     file I/O, path safety, cross-platform compat
     error.rs          error types mapped to user-facing messages
 tests/                frontend tests (unit / integration / e2e)
+specs/                feature specs (spec-driven development) and SRS validation
 docs/                 architecture, API reference, onboarding
 ```
 
