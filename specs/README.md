@@ -51,6 +51,12 @@ renumbered IDs, a traceability update, and a security review for any NFR-SEC-*,
 (the transfer path, which is identical over every IP interface). Its validity is
 discussed in [`validation-report.md` §1](validation-report.md#1-summary).
 
+On computers that lack Thunderbolt or USB4 at both ends, no software can
+provide it.
+[CR-20](validation-report.md#cr-20-in-detail-direct-cables-without-thunderbolt)
+lists every route examined, and the cable path the project supports instead:
+USB Ethernet adapters and one Ethernet cable.
+
 ## Workflow
 
 ```text

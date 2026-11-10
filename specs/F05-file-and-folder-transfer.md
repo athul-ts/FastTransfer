@@ -80,9 +80,9 @@ by CLAUDE.md.
 | AC-F05-10 | Given two transfers to one peer, then the second stays `QUEUED` until the first finishes | FR-TRANSFER-010 | T | planned: `commands::tests::second_transfer_waits_in_queue` | Implemented (per-peer queue in `orchestrator::run_send`), not yet tested |
 | AC-F05-11 | Dropping files on a device card starts a transfer to that device | FR-TRANSFER-003 | T | planned: `DeviceCard.test.tsx` | Implemented (`files::onFilesDropped`, drop zone), not yet tested |
 | AC-F05-12 | A 1 GiB file crosses the loopback with SHA-256 verified on both ends, and the measured throughput is reported | §112 | T (ignored by default; run on demand) | `session::tests::one_gib_loopback_milestone` | Passing 2026-11-09 (uncommitted): **1 GiB in 10.35 s = 104 MB/s**, measured end to end on the Windows dev laptop over loopback, including disk writes and the receiver's full re-hash. See F09 finding 5. |
-| AC-F05-13 | Windows ↔ Linux over a direct Ethernet cable, no router: 1 GB verified | §112, §73 | D | Manual | Planned — **feasible on the reference hardware** |
+| AC-F05-13 | Windows ↔ Linux over a direct Ethernet cable, no router: 1 GB verified | §112, §73 | D | Manual | Planned — **feasible on the reference hardware** once the Windows laptop has a USB Ethernet adapter (CR-20, D-08) |
 | AC-F05-14 | A 100 GB file transfers with bounded memory | FR-TRANSFER-006 | D | Manual (needs ~200 GB free across both machines, A-05) | Planned |
-| AC-F05-15 | Same as AC-F05-13 over Thunderbolt | §112 | D | Manual | **CONDITIONAL (§5.2)** |
+| AC-F05-15 | Same as AC-F05-13 over Thunderbolt | §112 | D | Manual | **CONDITIONAL (§5.2)**. Rig: the Linux endpoint with Thunderbolt enabled, plus a Thunderbolt or USB4 peer; the Windows laptop cannot take part. Windows ↔ Linux interoperability is unverified (CR-20) |
 
 ## 6. Out of scope
 

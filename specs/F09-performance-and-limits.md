@@ -50,10 +50,16 @@ does not grow with file size, and report only what was measured.
    reference hardware.
 4. **The reference hardware has no fast link on record.** §116.1.1 lists the
    Linux endpoint's onboard `enp0s31f6` (an Intel I219-class port, typically
-   1 Gb/s) and Wi-Fi, and no Ethernet port on the Windows laptop, whose USB-C
-   ports are 5 Gb/s USB 3.2 Gen 1 — so a USB Ethernet adapter may be needed for a
-   direct cable. Expect measurements around 1 Gb/s at best; multi-GB/s targets
-   are unverifiable here (R-09).
+   1 Gb/s) and Wi-Fi. The Windows laptop has no Ethernet port; its only network
+   adapter is Wi-Fi (confirmed 2026-11-09, CR-20). Its USB-C ports are 5 Gb/s
+   USB 3.2 Gen 1, so a direct cable needs a USB Ethernet adapter. Expected
+   ceilings:
+   - about 117 MB/s with the Linux endpoint's 1 GbE port;
+   - about 290 MB/s with 2.5 GbE adapters at both ends;
+   - under ~500 MB/s for any USB path on the Windows laptop, because the
+     5 Gb/s port loses 20 % to 8b/10b encoding, before any protocol overhead.
+
+   Multi-GB/s targets are unverifiable here (R-09).
 5. **The first measurement says the engine, not the link, is the limit.** The
    §112 milestone (AC-F05-12) moved 1 GiB over loopback in 10.35 s — **104 MB/s
    end to end** — on the Windows dev laptop (2026-11-09). Loopback has no network
@@ -92,6 +98,7 @@ does not grow with file size, and report only what was measured.
 | AC-F09-06 | Over direct gigabit Ethernet, a 10 GB transfer sustains ≥ 100 MB/s | §31 | D | Manual | Planned — **feasible on the reference hardware** |
 | AC-F09-07 | On a Thunderbolt pair, throughput meets the CR-12 bar | NFR-PERF-007 | D | Manual | **CONDITIONAL (§5.2)** |
 | AC-F09-08 | Hashing cost is analysed against link speed before Phase 8 | §23, NFR-PERF-007 | A | Analysis note | Planned |
+| AC-F09-09 | Over direct 2.5 GbE, with USB adapters at both ends, a 10 GB transfer meets the CR-12 bar | NFR-PERF-001, CR-20 | D | Manual | Planned. Needs the D-08 adapters. Expected to fail until the engine limit in finding 5 (104 MB/s) is fixed |
 
 ## 6. Out of scope
 

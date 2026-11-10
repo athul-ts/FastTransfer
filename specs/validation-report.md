@@ -18,16 +18,35 @@ not consistently (DD-01).
 - When both computers expose a Thunderbolt or USB4 network interface, the
   transfer is ordinary TCP over that interface. The engine needed (F03–F06) is
   the same one Ethernet uses, so building it is not wasted on any hardware.
-- **On the reference pair it cannot work at all.** The Windows laptop has no
-  Thunderbolt or USB4 controller; its USB-C ports are 5 Gb/s USB 3.2 Gen 1
-  (§116.1.1). Two USB hosts joined by a plain USB-C cable do not see each other,
-  so no software change can make that cable carry files between these two
-  machines.
+- **On the reference pair it cannot work at all.** The Windows laptop's CPU
+  contains a Thunderbolt block, but the firmware leaves it switched off, and
+  the USB-C ports are 5 Gb/s USB 3.2 Gen 1 (§116.1.1, DD-21). Two USB hosts
+  joined by a plain USB-C cable do not see each other, so no software change
+  can make that cable carry files between these two machines.
 - **What is valid and demonstrable now** is the guaranteed half of the
   objective: direct, router-free, verified transfer over the best path that
   exists — on this hardware, a direct Ethernet cable (USB Ethernet adapter if
   needed). Verifying the Thunderbolt half needs two machines that both have
   Thunderbolt 3/4 or USB4 host-to-host networking.
+
+### What about laptops without a Thunderbolt controller?
+
+**No software can give them Thunderbolt** (CR-20, investigated 2026-11-09).
+Thunderbolt networking needs an enabled Thunderbolt or USB4 host controller at
+*both* ends. No driver, app or cable can replace one. The reference Windows
+laptop shows the point more sharply than §116.1.1 does. Its Core Ultra 7 255H
+contains Intel's integrated Thunderbolt 4 block. But the laptop's firmware
+leaves that block switched off, and ASUS built the USB-C ports for 5 Gb/s USB
+only.
+
+Eight routes were examined:
+
+- **Adopted:** USB Ethernet adapters plus one Ethernet cable. The app already
+  supports this.
+- **Spike only:** driving a USB 3.0 bridge cable directly is worth a measured
+  experiment, nothing more yet.
+- **Rejected:** the rest, each with its reason, in
+  [CR-20 in detail](#cr-20-in-detail-direct-cables-without-thunderbolt).
 
 ### Verdicts across the 85 identified requirements
 
@@ -93,6 +112,8 @@ About 30 further binding statements carry no requirement ID at all (§5).
 | DD-18 | Repository root | `FastTransfer_SRS_v2.0.md` sits next to v3.0; both read as a baseline. | CR-19 |
 | DD-19 | FR-LINK-002, §4.3 B–C, §88, §106 "Cable Link" bullets 3–4, §112 | `USB_DATA_ONLY` and `CHARGE_ONLY` are not observable on host-to-host links (§116.1.1: "Zero change"); the criteria are unreachable. | CR-02 |
 | DD-20 | §117.2, R-02 | Status text is dated 2026-10-08 ("92 unit tests"); the suite is now 159. Cosmetic. | CR-11 |
+| DD-21 | §116.1.1 | Says the Windows endpoint has no Thunderbolt controller and that "no OS-level or firmware-level change can create one". Inspection on 2026-11-09 shows otherwise. The CPU (Core Ultra 7 255H, Arrow Lake-H) integrates Thunderbolt 4, and its Type-C USB controller `8086:7EC0` is enabled. The Thunderbolt/USB4 host interfaces beside that controller are missing from the PCI bus, which means the firmware has disabled them; no Windows policy is involved (checked the same day, CR-20). The conclusion still holds; the stated reason is imprecise. | CR-20 |
+| DD-22 | §5.2, §6, §88, §115 | Nothing says which direct cables are supported when Thunderbolt is absent. §6 does not rule out bridge cables, USB device mode, debug links or firmware modification. §88 has no row for USB Ethernet adapters. §115 records no assumption about the Windows endpoint's Ethernet port; it has none. | CR-20 |
 
 ## 3. Feature verdicts
 
@@ -261,13 +282,107 @@ security review.
 | CR-10 | Medium | Decide whether §64 is v1 (*shall*) or v1.2 (§100). | §64, §100 |
 | CR-11 | Low | Add revision-history entries for 2026-10-09 (consider 3.1); refresh §117.2 and R-02 status text. | front matter, §116, §117.2 |
 | CR-12 | Medium | Add pass marks: NFR-PERF-007 (≥ 80 % of min(link TCP throughput, storage write speed)); NFR-PERF-001/-002 (benchmark and inspection criteria); FR-CHUNK-002 (default and bounds); FR-CHUNK-004 (≤ 1 bit per chunk + O(files)); FR-FS-003 (named cases); §51 (5 MiB × 3). | §21, §25, §30, §51 |
-| CR-13 | Medium | Add assumptions: no macOS reference machine; no Thunderbolt-capable pair; Windows laptop Ethernet unknown. Mark the affected §87/§88 rows. | §115, §87, §88 |
+| CR-13 | Medium | Add assumptions: no macOS reference machine; no Thunderbolt-capable pair. Mark the affected §87/§88 rows. (CR-20 covers the Windows laptop's Ethernet port; it has none.) | §115, §87, §88 |
 | CR-14 | Medium | Pick one bar for restart recovery across FR-RESUME-004, §53 and §106. | §22, §53, §106 |
 | CR-15 | Low | §102: sender chooses the peer; receiver's folder is its setting (§45). Fix the pairing step order. | §102 |
 | CR-16 | Medium | Resolve §67 vs CLAUDE.md: the core returns `kind` + parameters; the UI owns all text. Update CLAUDE.md in the same change. | §67, CLAUDE.md |
 | CR-17 | Medium — Review | Chunk size bounds: 64 KiB to 16 MiB. | §18.3, §21, §93 |
 | CR-18 | Low | Manifest ceiling: 100 000 entries per transfer in v1 with a clear refusal; paged manifests later. | §18.4, §64, §93 |
 | CR-19 | Low | Move `FastTransfer_SRS_v2.0.md` out of the repository root (git history keeps it). | repository |
+| CR-20 | High | Direct cables when Thunderbolt is absent. The SRS should state that no software can provide Thunderbolt without a controller at both ends, and name direct Ethernet (including USB Ethernet adapters) as the cable path. Also: list the rejected routes in §6; add rows to §88; add assumption A-08 and dependency D-08; correct the reason given in §116.1.1; make FR-LINK-007's `NONE` remedy name the supported alternative. Details below. | §5.2, §6, §17, §88, §115, §116.1.1 |
+
+### CR-20 in detail: direct cables without Thunderbolt
+
+Raised 2026-11-09, when the owner asked whether a laptop without a Thunderbolt
+controller can transfer files over Thunderbolt in any way.
+
+**What the reference Windows laptop actually has.** Read-only inspection on
+the machine itself, 2026-11-09:
+
+| Observation | Result |
+|---|---|
+| Model, firmware | ASUS Vivobook S 14 S3407CA, BIOS S3407CA.303 (2025-03-03) |
+| CPU | Intel Core Ultra 7 255H (Arrow Lake-H). Intel ships this family with integrated Thunderbolt 4 |
+| Type-C USB controller | `8086:7EC0` at 00:0D.0, enabled. It belongs to the chip's Type-C subsystem, which serves only USB-C ports |
+| Thunderbolt/USB4 host interfaces | Absent. On this platform they would be `8086:7EC2` and `7EC3` (the Meteor Lake-P IDs in Linux `nhi.h`). No Thunderbolt PCIe root ports appear either |
+| USB device controller (xDCI) | Absent. Linux `dwc3-pci` lists `8086:777E` and `7EC1` for this platform; neither appears. The laptop therefore cannot act as a USB device |
+| Type-C port management | UCSI (`ACPI\USBC000`); ports rated USB 3.2 Gen 1, 5 Gb/s |
+| Network adapters | Wi-Fi only (Realtek 8852BE); no Ethernet port |
+| Company management | The laptop is Entra ID joined and managed by Intune. Removable storage is set to deny all access, which is why USB drives fail. **Not set:** device-installation restrictions (the mechanism Microsoft documents for blocking Thunderbolt controllers) and Defender device control (off). The USB4 drivers are enabled (`Usb4HostRouter` Start=3). Kernel DMA Protection's enumeration policy is the Windows default, "only after log in/screen unlock". Windows has never seen a Thunderbolt (`CC_0C0A`) or USB4 (`CC_0C0340`) device on this laptop, and no device is in an error state |
+
+The chip contains the Thunderbolt block, but the firmware and the board do not
+use it. **Company policy is not the cause.** Windows policies act on drivers
+and access after the hardware has been found. A policy-blocked controller still
+appears in the device list, carrying an error. Here the controller never
+appears at all. ASUS rates the ports at 5 Gb/s, below what the chip's Type-C block can
+do. That points to limits on the board itself — the signal path and the
+power-delivery controller's firmware, which are exactly the parts Thunderbolt
+depends on. *This last point is an inference, not a measurement.*
+
+**Routes examined**
+
+| # | Route | On the reference pair | Ceiling | Work for FastTransfer | Verdict |
+|---|---|---|---|---|---|
+| 1 | Thunderbolt/USB4 networking at both ends | Not possible with the Windows laptop. The Linux endpoint can take part once Thunderbolt is enabled in its firmware, paired with another Thunderbolt or USB4 machine | 20–40 Gb/s link | None: F01/F02 already detect and prefer it | **Keep** as the conditional headline (§5.2) |
+| 2 | USB Ethernet adapter(s) plus one Ethernet cable, no router | Yes. Windows needs an adapter; Linux has onboard 1 GbE | 1 GbE ≈ 117 MB/s; 2.5 GbE ≈ 290 MB/s. Any USB path on the Windows laptop stays under ~500 MB/s (a 5 Gb/s port with 8b/10b encoding) | None: names such as `Ethernet 3` and `enx…` already classify as Ethernet (AC-F02-11) | **Adopt** as the guaranteed cable path and the reference rig |
+| 3 | USB 3.0 bridge cable in network mode (Prolific PL27A1 with RNDIS firmware, ID `067B:27A5`) | Unlikely. No retail cable with this firmware was found, and Plugable says it does not have it. Linux maintainers are disabling the RNDIS drivers in 2026 for security reasons | ≤ 5 Gb/s signalling; unmeasured | Classify `usb0`-style interfaces | **Reject** |
+| 4 | USB 3.0 bridge cable driven directly (retail PL27A1, ID `067B:27A1`). Windows uses the built-in WinUSB driver; Linux uses user-space USB after detaching `plusb` | Plausible; unverified | ≤ 5 Gb/s signalling; unmeasured | A new non-IP transport that carries the session byte stream over USB bulk pipes. Also: peer detection over the cable, a USB library, a Linux udev rule | **Spike only**: measure before deciding (D-CR20-1) |
+| 5 | One laptop acts as a USB network device (NCM gadget) | No. The Windows laptop has no USB device controller, and Windows device mode needs one | ≤ 5 Gb/s | Linux-only setup | **Reject** for v1 |
+| 6 | xHCI Debug Capability over a USB 3.0 A-to-A debugging cable | Lab only. Linux must be the debug target, and Windows needs a custom driver binding. The feature is built for kernel debugging and does not support runtime suspend | Unmeasured | A custom transport | **Reject** |
+| 7 | Turning on the CPU's disabled Thunderbolt block through hidden firmware settings | ASUS does not support it, and the port hardware is built for 5 Gb/s. Editing firmware variables can leave a laptop unable to boot | — | — | **Reject; never recommend** |
+| 8 | Wi-Fi, with one laptop hosting a hotspot (no router) | Yes | Far below any cable | None (this is already "Wi-Fi") | **Keep** as the fallback |
+
+No vendor offers Thunderbolt transfer without Thunderbolt hardware. Intel's own
+PC-to-PC product, Thunderbolt Share, needs Thunderbolt 4 or 5 on both PCs.
+
+**Proposed SRS changes**
+
+1. §5.2: add "Where either computer lacks Thunderbolt or USB4 host-to-host
+   networking, no software can provide it. The direct-cable path is then
+   Ethernet, including USB Ethernet adapters."
+2. §6 (non-goals): add modifying firmware or enabling hidden hardware, USB
+   device (gadget) mode, xHCI debug links and RNDIS bridge cables. Driving a
+   bridge cable directly also stays out of scope unless the D-CR20-1 spike is
+   accepted.
+3. §88: add two rows: "Direct Ethernet through USB Ethernet adapter(s), no
+   router, no DHCP"; "Windows USB4 ↔ Linux Thunderbolt 3 host-to-host
+   (interoperability)".
+4. §115.1: add **A-08**. The Windows endpoint has no Ethernet port, so a direct
+   cable needs a USB Ethernet adapter, and its 5 Gb/s USB port caps every USB
+   path. §115.2: add **D-08**, USB 3.x 2.5 GbE Ethernet adapter(s).
+5. §116.1.1: replace "no controller … no firmware-level change can create one"
+   with the inspection results above (DD-21). The conclusion does not change.
+6. FR-LINK-007: when the class is `NONE`, the explanation names the supported
+   alternative, a USB Ethernet adapter and an Ethernet cable. It never suggests
+   changing firmware.
+
+**Decision**
+
+| ID | Question | Recommendation | Status |
+|---|---|---|---|
+| D-CR20-1 | Should route 4, a USB bridge-cable transport driven directly, be pursued? | Only as a time-boxed spike. Use one PL27A1 cable and a throwaway program that streams bulk data Windows ↔ Linux and records MB/s. Build it into FastTransfer only if it beats route 2 on the reference pair, and only if the owner accepts the new transport, its dependency and the permissions it needs. Label it "USB bridge cable", never Thunderbolt (FR-LINK-003). Plugging the cable in never implies trust; F08 applies unchanged. Learn the cable's control requests from documentation or bench observation; do not copy GPL driver code. | Proposed |
+
+**Hardware actions** (these are not SRS changes):
+
+- Buy one or two USB 2.5 GbE adapters, for AC-F02-09, AC-F05-13 and AC-F09-09.
+- Enable Thunderbolt in the Linux endpoint's firmware, then check `boltctl` and
+  `/sys/bus/thunderbolt`.
+- Borrow a Thunderbolt 4 or USB4 machine for the CONDITIONAL criteria.
+
+**Sources:**
+- [Intel Core Ultra 200H/200U quick reference](https://cdrdv2-public.intel.com/842536/Intel%20Core%20Ultra%20200H%20and%20200U%20Series%20Processors%20-%20Quick%20Reference%20Guide%20v1.1.pdf)
+- [Notebookcheck: Core Ultra 7 255H](https://www.notebookcheck.net/Intel-Core-Ultra-7-255H-Processor-Benchmarks-and-Specs.944139.0.html)
+- [Linux `nhi.h`](https://codebrowser.dev/linux/linux/drivers/thunderbolt/nhi.h.html)
+- [Linux `dwc3-pci.c`](https://kernelsources.org/source/xref/linux/drivers/usb/dwc3/dwc3-pci.c?a=true)
+- [Prolific PL27A1 datasheet](https://www.prolific.com.tw/wp-content/uploads/2025/07/DS-27131201-PL27A1_V1.5.pdf)
+- [Plugable: USB 3.0 RNDIS mode](https://support.plugable.com/t/usb-3-0-rndis-mode/16372)
+- [Linux `plusb` PL-27A1 patch](https://lore.kernel.org/all/56C9CC84.7040705@gmail.com/T/)
+- [Phoronix: Linux disabling RNDIS drivers](https://www.phoronix.com/news/RNDIS-Disable-Linux-2026-Patch)
+- [Linux USB3 debug port](https://docs.kernel.org/driver-api/usb/usb3-debug-port.html)
+- [Microsoft NCM driver](https://github.com/microsoft/NCM-Driver-for-Windows)
+- [Linux USB4 and Thunderbolt](https://docs.kernel.org/admin-guide/thunderbolt.html)
+- [Microsoft USB4 connection manager](https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/usb4-intro-to-connection-manager)
+- [Intel Thunderbolt Share requirements](https://intel.com/content/www/us/en/support/articles/000099003/software.html)
 
 ## 7. Code defects found while validating
 
@@ -291,7 +406,8 @@ security review.
 | Can verify now | Cannot verify now |
 |---|---|
 | Everything marked **T** (loopback tests) | Any positive Thunderbolt or USB4 criterion (no capable pair) |
-| Windows ↔ Linux over a direct Ethernet cable: discovery, transfer, resume, unplug/replug (AC-F02-09, AC-F03-10, AC-F05-13, AC-F06-12) | macOS anything (no Mac): FR-LINK-004, five of nine §87 pairs |
+| Windows ↔ Linux over a direct Ethernet cable, with a USB Ethernet adapter on the Windows laptop (CR-20): discovery, transfer, resume, unplug/replug (AC-F02-09, AC-F03-10, AC-F05-13, AC-F06-12) | macOS anything (no Mac): FR-LINK-004, five of nine §87 pairs |
+| 2.5 GbE throughput, with USB adapters at both ends (AC-F09-09) | Windows USB4 ↔ Linux Thunderbolt 3 interoperability (needs a USB4 Windows machine, and Thunderbolt enabled on the Linux endpoint) |
 | Honest `NONE` classification with the USB-C cable connected (done, §119.3) | `USB_DATA_ONLY` / `CHARGE_ONLY` (not observable; CR-02) |
 | Windows "Public" profile note (AC-F11-06) | Multi-GB/s throughput (NFR-PERF-005, -007) |
 | FAT32 4 GiB behaviour with a USB stick (AC-F07-15) | Signed installers (D-05, D-06 not acquired) |
@@ -302,8 +418,12 @@ security review.
    was accepted on 2026-11-09.)
 2. **Approve F03, F04, F05, F06 and F07.** They are valid now, testable on
    loopback and demonstrable over direct Ethernet. Implement them tests-first.
-3. **Security review of F08**, then implement it — before any release build can
+3. **Get the cable hardware** (CR-20): a USB 2.5 GbE adapter for the Windows
+   laptop (ideally one per machine), Thunderbolt enabled in the Linux
+   endpoint's firmware, and a borrowed Thunderbolt 4 or USB4 machine. Without
+   it, no D criterion on a cable can run.
+4. **Security review of F08**, then implement it — before any release build can
    transfer files.
-4. **Finish F01 and F02**: link watcher, fallback loop, measurement feedback.
-5. **F09–F12.**
-6. Re-validate this report at the end of each phase (§116.3).
+5. **Finish F01 and F02**: link watcher, fallback loop, measurement feedback.
+6. **F09–F12.**
+7. Re-validate this report at the end of each phase (§116.3).

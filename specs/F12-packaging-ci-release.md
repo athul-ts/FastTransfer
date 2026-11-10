@@ -37,6 +37,9 @@ signed installer that works on a clean machine.
    host-to-host links that the OS does not report. → CR-02.
 3. **The CI bundle job runs only on manual dispatch**, so "a build that compiles
    is not a build that installs" is checked only when someone remembers.
+4. **§88 has no row for the cable the reference pair can actually use**, a USB
+   Ethernet adapter. It also has none for the Windows USB4 ↔ Linux
+   Thunderbolt 3 pairing, whose interoperability is unverified. → **CR-20**.
 
 ## 4. Design decisions
 

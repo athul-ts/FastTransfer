@@ -43,6 +43,14 @@ show which one carried the transfer.
    name counts only when the F01 probe confirms a TB network (implemented). An
    Ethernet-vs-Wi-Fi misclassification only changes ranking, not a capability
    claim. → D-F02-3.
+4. **USB Ethernet adapters need no new code; other USB network links are
+   dropped.** CR-20 makes a USB Ethernet adapter the cable path for computers
+   without Thunderbolt. Such adapters are named `Ethernet N` on Windows and
+   `enx…` or `enp…u…` on Linux, and they already classify as Ethernet. Linux
+   names other USB network links `usb0` and similar (RNDIS devices, NCM
+   gadgets, bridge cables). Those classify as `Other`, so they never become
+   transports. That matches CR-20, which rejects or defers all of them.
+   → D-F02-6.
 
 ## 4. Design decisions
 
@@ -53,6 +61,7 @@ show which one carried the transfer.
 | D-F02-3 | How is a Windows interface's type found? | Names now (`Ethernet*`, `Wi-Fi`, `WLAN`); later `GetAdaptersAddresses` `IfType` (6 = Ethernet, 71 = 802.11), which also fixes the join described in §119.3. | Proposed |
 | D-F02-4 | Fallback order when connecting | Try each peer endpoint ordered by the local interface's score; 5 s connect timeout each (`CONNECT_TIMEOUT`); stop at first success; report which one won. | Proposed |
 | D-F02-5 | Socket tuning | Request 4 MiB send/receive buffers and `TCP_NODELAY` (implemented). Revisit in F09 with measurements. | Accepted in code (uncommitted) |
+| D-F02-6 | USB network links other than Ethernet adapters | Out of scope in v1 (CR-20). If the bridge-cable spike (D-CR20-1) is adopted, give the link its own label, "USB bridge cable". Rank it within the wired class by measurement, and never as Thunderbolt. | Proposed |
 
 ## 5. Acceptance criteria
 
@@ -66,8 +75,9 @@ show which one carried the transfer.
 | AC-F02-06 | With no usable interface, selection fails with `noTransport` and a remedy | FR-TRANS-006 | T | `no_interfaces_reports_no_transport` | Passing |
 | AC-F02-07 | Given a peer with two endpoints where the first refuses, when sending, then the second is used and the transfer records which transport carried it | FR-TRANS-006, FR-TRANS-008 | T | `session::tests::falls_back_to_the_next_endpoint` | Passing (uncommitted) |
 | AC-F02-08 | Given a completed transfer, then its measured throughput is stored and shown, never the link rating | FR-TRANS-004, §101 | T | planned: `transport::tests::measurement_feeds_ranking_within_a_class` | Planned |
-| AC-F02-09 | Given two machines joined by a direct Ethernet cable and no router, when both apps run, then Ethernet is selected and reported | FR-TRANS-001, §73 | D | Manual | Planned — **feasible on the reference hardware** with an Ethernet adapter |
+| AC-F02-09 | Given two machines joined by a direct Ethernet cable and no router, when both apps run, then Ethernet is selected and reported | FR-TRANS-001, §73 | D | Manual | Planned — **feasible on the reference hardware** once the Windows laptop has a USB Ethernet adapter; it has no Ethernet port (CR-20, D-08) |
 | AC-F02-10 | Given two TB-capable machines, then Thunderbolt is selected over Ethernet | FR-TRANS-004 | D | Manual | **CONDITIONAL (§5.2)** |
+| AC-F02-11 | A USB Ethernet adapter's interface classifies as Ethernet: `Ethernet 3` on Windows, `enx…` on Linux | FR-TRANS-002, CR-20 | T | `transport::tests::ordinary_wired_and_wireless_names_classify` | Passing. A Linux path-based name (`enp0s20f0u1`) matches the `enp` rule but is not yet in the test |
 
 ## 6. Out of scope
 
